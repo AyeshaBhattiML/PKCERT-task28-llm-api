@@ -1,213 +1,148 @@
-# TASK 28 - copy of finalized Part-B API
-# Production LLM Inference API with FastAPI
 
-# 1. IMPORTS
+# ============================================================
+# TASK 28 - PART C
+# Production LLM Inference API
+# FastAPI + Hugging Face Remote Inference + Render
+# ============================================================
 
 import asyncio
 import json
 import logging
+import os
 import time
+
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
-import torch
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from transformers import (
-    pipeline,
-    AutoTokenizer,
-    AutoModelForSeq2SeqLM,
-    AutoModelForCausalLM
-)
 
-# 2. STRUCTURED JSON LOGGING
+from pydantic import BaseModel, Field, field_validator
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from huggingface_hub import InferenceClient
+
+
+# ============================================================
+# 1. STRUCTURED JSON LOGGING
+# ============================================================
 
 class JSONFormatter(logging.Formatter):
     """
     Format application logs as JSON objects.
     """
+
     def format(self, record):
         log_record = {
-            "timestamp": self.formatTime(
-                record,
-                self.datefmt
-            ),
+            "timestamp": self.formatTime(record),
             "level": record.levelname,
             "message": record.getMessage()
         }
+
         return json.dumps(log_record)
+
+
 logger = logging.getLogger("task28_api")
+
 logger.setLevel(logging.INFO)
+
 handler = logging.StreamHandler()
+
 handler.setFormatter(
     JSONFormatter()
 )
+
 logger.handlers.clear()
+
 logger.addHandler(handler)
 
-# 3. MODEL CONFIGURATION
+
+# ============================================================
+# 2. MODEL CONFIGURATION
+# ============================================================
+
+# Models remain on Hugging Face.
+# Render does NOT download or store model weights.
 
 SENTIMENT_MODEL = (
     "distilbert-base-uncased-finetuned-sst-2-english"
 )
+
 SUMMARIZATION_MODEL = (
     "sshleifer/distilbart-cnn-6-6"
 )
+
 GENERATION_MODEL = "distilgpt2"
 
-# 4. GLOBAL MODEL REFERENCES
 
-sentiment_pipeline = None
-summarization_tokenizer = None
-summarization_model = None
-generation_tokenizer = None
-generation_model = None
-summarization_device = "cpu"
-generation_device = "cpu"
+# ============================================================
+# 3. ENVIRONMENT CONFIGURATION
+# ============================================================
 
-# 5. DEVICE CONFIGURATION
+# Hugging Face token is stored securely in Render
+# Environment Variables.
 
-device = 0 if torch.cuda.is_available() else -1
-logger.info(
-    "Inference device: %s",
-    "GPU" if device == 0 else "CPU"
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+# Render provides PORT automatically.
+# Local development falls back to port 8000.
+
+PORT = int(
+    os.getenv("PORT", "8000")
 )
 
-# 6. THREAD POOL
-# Heavy model inference can block the FastAPI event loop.
-# A small thread pool allows inference to run separately.
 
-inference_executor = ThreadPoolExecutor(
-    max_workers=2
-)
+# ============================================================
+# 4. HUGGING FACE CLIENT
+# ============================================================
 
-# 7. MODEL LOADING
+hf_client = None
 
-def load_models():
+
+def initialize_huggingface_client():
     """
-    Load all pretrained models once during application startup.
+    Initialize the Hugging Face remote inference client.
+
+    The token is read from the environment and is never
+    hard-coded into the source code.
     """
-    global sentiment_pipeline
-    global summarization_tokenizer
-    global summarization_model
-    global generation_tokenizer
-    global generation_model
-    global summarization_device
-    global generation_device
 
-    # Sentiment Model
+    global hf_client
 
-    logger.info(
-        "Loading sentiment analysis model."
-    )
-    sentiment_pipeline = pipeline(
-        task="sentiment-analysis",
-        model=SENTIMENT_MODEL,
-        device=device
-    )
-    logger.info(
-        "Sentiment analysis model loaded successfully."
-    )
-    # Summarization Model
-
-    logger.info(
-        "Loading summarization model."
-    )
-    summarization_tokenizer = (
-        AutoTokenizer.from_pretrained(
-            SUMMARIZATION_MODEL
+    if not HF_TOKEN:
+        logger.warning(
+            "HF_TOKEN is not configured."
         )
-    )
-    summarization_model = (
-        AutoModelForSeq2SeqLM.from_pretrained(
-            SUMMARIZATION_MODEL
-        )
-    )
-    summarization_model.eval()
-    if torch.cuda.is_available():
-        summarization_model = (
-            summarization_model.to("cuda")
-        )
-        summarization_device = "cuda"
-    else:
-        summarization_device = "cpu"
-    logger.info(
-        "Summarization model loaded successfully."
-    )
-    logger.info(
-        "Summarization device: %s",
-        summarization_device
-    )
+        return
 
-    # Causal Text Generation Model
-
-    logger.info(
-        "Loading causal generation model."
-    )
-    generation_tokenizer = (
-        AutoTokenizer.from_pretrained(
-            GENERATION_MODEL
-        )
-    )
-    generation_model = (
-        AutoModelForCausalLM.from_pretrained(
-            GENERATION_MODEL
-        )
-    )
-
-    generation_model.eval()
-
-    # GPT-2 does not define a padding token.
-    if generation_tokenizer.pad_token is None:
-
-        generation_tokenizer.pad_token = (
-            generation_tokenizer.eos_token
-        )
-
-    if torch.cuda.is_available():
-
-        generation_model = (
-            generation_model.to("cuda")
-        )
-
-        generation_device = "cuda"
-
-    else:
-
-        generation_device = "cpu"
-
-    logger.info(
-        "Causal text generation model loaded successfully."
+    hf_client = InferenceClient(
+        provider="hf-inference",
+        api_key=HF_TOKEN
     )
 
     logger.info(
-        "Generation device: %s",
-        generation_device
+        "Hugging Face remote inference client initialized."
     )
 
 
-# 8. FASTAPI LIFESPAN
+# ============================================================
+# 5. FASTAPI LIFESPAN
+# ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Manage application startup and shutdown.
-
-    Models are loaded once when the application starts.
-    """
 
     logger.info(
         "Starting Task 28 LLM Inference API."
     )
 
-    load_models()
-
     logger.info(
-        "All models initialized successfully."
+        "Remote Hugging Face inference enabled."
     )
+
+    initialize_huggingface_client()
 
     yield
 
@@ -215,41 +150,36 @@ async def lifespan(app: FastAPI):
         "Shutting down Task 28 LLM Inference API."
     )
 
-    inference_executor.shutdown(
-        wait=True
-    )
 
-    logger.info(
-        "Inference executor shut down."
-    )
-
-
-# 9. FASTAPI APPLICATION
+# ============================================================
+# 6. FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="Task 28 LLM Inference API",
     description=(
         "Production-style API for sentiment analysis, "
-        "abstractive summarization, and causal text generation."
+        "abstractive summarization, and causal text generation "
+        "using Hugging Face remote inference."
     ),
     version="1.0.0",
     lifespan=lifespan
 )
 
-print("FastAPI application initialized.")
 
+# ============================================================
+# 7. CORS MIDDLEWARE
+# ============================================================
 
-# 10. CORS MIDDLEWARE
+# Allows Streamlit, HTML, JavaScript, or another frontend
+# to communicate with the API.
 
 app.add_middleware(
     CORSMiddleware,
 
-    allow_origins=[
-        "http://127.0.0.1:8000",
-        "http://localhost:8000"
-    ],
+    allow_origins=["*"],
 
-    allow_credentials=True,
+    allow_credentials=False,
 
     allow_methods=["*"],
 
@@ -257,7 +187,9 @@ app.add_middleware(
 )
 
 
-# 11. STANDARD ERROR RESPONSE
+# ============================================================
+# 8. STANDARD ERROR RESPONSE
+# ============================================================
 
 class ErrorResponse(BaseModel):
     """
@@ -271,19 +203,19 @@ class ErrorResponse(BaseModel):
     status_code: int
 
 
-# 12. HTTP EXCEPTION HANDLER
+# ============================================================
+# 9. HTTP EXCEPTION HANDLER
+# ============================================================
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(
     request: Request,
     exc: StarletteHTTPException
 ):
-    """
-    Handle HTTP exceptions using a standardized JSON format.
-    """
 
     return JSONResponse(
         status_code=exc.status_code,
+
         content={
             "error": "HTTP_ERROR",
             "message": str(exc.detail),
@@ -292,21 +224,19 @@ async def http_exception_handler(
     )
 
 
-# 13. VALIDATION ERROR HANDLER
+# ============================================================
+# 10. VALIDATION ERROR HANDLER
+# ============================================================
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError
 ):
-    """
-    Handle Pydantic/FastAPI request validation errors.
-
-    Returns HTTP 422.
-    """
 
     return JSONResponse(
         status_code=422,
+
         content={
             "error": "VALIDATION_ERROR",
             "message": "Request validation failed.",
@@ -316,21 +246,19 @@ async def validation_exception_handler(
     )
 
 
-# 14. VALUE ERROR HANDLER
+# ============================================================
+# 11. VALUE ERROR HANDLER
+# ============================================================
 
 @app.exception_handler(ValueError)
 async def value_error_handler(
     request: Request,
     exc: ValueError
 ):
-    """
-    Handle application-level ValueError exceptions.
-
-    Returns HTTP 400.
-    """
 
     return JSONResponse(
         status_code=400,
+
         content={
             "error": "BAD_REQUEST",
             "message": str(exc),
@@ -339,18 +267,15 @@ async def value_error_handler(
     )
 
 
-# 15. GENERAL EXCEPTION HANDLER
+# ============================================================
+# 12. GENERAL EXCEPTION HANDLER
+# ============================================================
 
 @app.exception_handler(Exception)
 async def general_exception_handler(
     request: Request,
     exc: Exception
 ):
-    """
-    Handle unexpected internal application errors.
-
-    Returns HTTP 500.
-    """
 
     logger.exception(
         "Unhandled application exception."
@@ -358,6 +283,7 @@ async def general_exception_handler(
 
     return JSONResponse(
         status_code=500,
+
         content={
             "error": "INTERNAL_SERVER_ERROR",
             "message": (
@@ -368,12 +294,11 @@ async def general_exception_handler(
     )
 
 
-# 16. SENTIMENT REQUEST SCHEMA
+# ============================================================
+# 13. SENTIMENT REQUEST SCHEMA
+# ============================================================
 
 class SentimentRequest(BaseModel):
-    """
-    Request schema for sentiment analysis.
-    """
 
     text: str = Field(
         ...,
@@ -389,7 +314,6 @@ class SentimentRequest(BaseModel):
         value = value.strip()
 
         if not value:
-
             raise ValueError(
                 "Text cannot be empty."
             )
@@ -397,12 +321,11 @@ class SentimentRequest(BaseModel):
         return value
 
 
-# 17. SENTIMENT RESPONSE SCHEMA
+# ============================================================
+# 14. SENTIMENT RESPONSE SCHEMA
+# ============================================================
 
 class SentimentResponse(BaseModel):
-    """
-    Response schema for sentiment analysis.
-    """
 
     label: str
 
@@ -413,12 +336,11 @@ class SentimentResponse(BaseModel):
     )
 
 
-# 18. SUMMARIZATION REQUEST SCHEMA
+# ============================================================
+# 15. SUMMARIZATION REQUEST SCHEMA
+# ============================================================
 
 class SummarizationRequest(BaseModel):
-    """
-    Request schema for abstractive summarization.
-    """
 
     text: str = Field(
         ...,
@@ -430,21 +352,21 @@ class SummarizationRequest(BaseModel):
     max_tokens: int = Field(
         default=80,
         ge=10,
-        le=512,
+        le=256,
         description="Maximum summary tokens."
     )
 
     min_tokens: int = Field(
         default=20,
         ge=0,
-        le=256,
+        le=128,
         description="Minimum summary tokens."
     )
 
     num_beams: int = Field(
         default=4,
         ge=1,
-        le=10,
+        le=8,
         description="Number of beam-search candidates."
     )
 
@@ -455,7 +377,6 @@ class SummarizationRequest(BaseModel):
         value = value.strip()
 
         if not value:
-
             raise ValueError(
                 "Text cannot be empty."
             )
@@ -463,35 +384,33 @@ class SummarizationRequest(BaseModel):
         return value
 
 
-# 19. SUMMARIZATION RESPONSE SCHEMA
+# ============================================================
+# 16. SUMMARIZATION RESPONSE SCHEMA
+# ============================================================
 
 class SummarizationResponse(BaseModel):
-    """
-    Response schema for summarization.
-    """
 
     summary: str
 
 
-# 20. GENERATION REQUEST SCHEMA
+# ============================================================
+# 17. GENERATION REQUEST SCHEMA
+# ============================================================
 
 class GenerationRequest(BaseModel):
-    """
-    Request schema for causal text generation.
-    """
 
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=10000,
+        max_length=5000,
         description="Initial text prompt."
     )
 
     max_tokens: int = Field(
         default=50,
         ge=1,
-        le=512,
-        description="Maximum number of generated tokens."
+        le=128,
+        description="Maximum generated tokens."
     )
 
     do_sample: bool = Field(
@@ -502,7 +421,7 @@ class GenerationRequest(BaseModel):
     num_beams: int = Field(
         default=1,
         ge=1,
-        le=10,
+        le=5,
         description="Number of beam-search candidates."
     )
 
@@ -534,7 +453,6 @@ class GenerationRequest(BaseModel):
         value = value.strip()
 
         if not value:
-
             raise ValueError(
                 "Prompt cannot be empty."
             )
@@ -542,44 +460,37 @@ class GenerationRequest(BaseModel):
         return value
 
 
-# 21. GENERATION RESPONSE SCHEMA
+# ============================================================
+# 18. GENERATION RESPONSE SCHEMA
+# ============================================================
 
 class GenerationResponse(BaseModel):
-    """
-    Response schema for causal generation.
-    """
 
     generated_text: str
 
 
-# 22. HEALTH CHECK ENDPOINT
+# ============================================================
+# 19. HEALTH CHECK
+# ============================================================
 
 @app.get(
     "/healthz",
     response_model=dict
 )
 async def health_check():
-    """
-    Return the health status of the API service.
-    """
 
     return {
         "status": "healthy",
-        "service": "Task 28 LLM Inference API"
+        "service": "Task 28 LLM Inference API",
+        "inference": "Hugging Face remote",
+        "model_loading": "remote",
+        "device": "Hugging Face"
     }
 
 
-# 23. SENTIMENT INFERENCE FUNCTION
-
-def run_sentiment_inference(text: str):
-    """
-    Run sentiment model inference.
-    """
-
-    return sentiment_pipeline(text)
-
-
-# 24. SENTIMENT API ENDPOINT
+# ============================================================
+# 20. SENTIMENT ENDPOINT
+# ============================================================
 
 @app.post(
     "/api/v1/sentiment",
@@ -588,18 +499,22 @@ def run_sentiment_inference(text: str):
 async def sentiment_analysis(
     request: SentimentRequest
 ):
-    """
-    Perform sentiment analysis.
-    """
+
+    if hf_client is None:
+        raise ValueError(
+            "HF_TOKEN is not configured."
+        )
 
     start_time = time.perf_counter()
 
-    loop = asyncio.get_running_loop()
+    # Run the synchronous Hugging Face client in a worker
+    # thread so the FastAPI event loop remains responsive.
 
-    result = await loop.run_in_executor(
-        inference_executor,
-        run_sentiment_inference,
-        request.text
+    result = await asyncio.to_thread(
+        hf_client.text_classification,
+        request.text,
+        model=SENTIMENT_MODEL,
+        top_k=1
     )
 
     latency = time.perf_counter() - start_time
@@ -610,57 +525,14 @@ async def sentiment_analysis(
     )
 
     return SentimentResponse(
-        label=result[0]["label"],
-        score=result[0]["score"]
+        label=result[0].label,
+        score=result[0].score
     )
 
 
-# 25. SUMMARIZATION INFERENCE FUNCTION
-
-def run_summarization_inference(
-    request: SummarizationRequest
-):
-    """
-    Run summarization model inference.
-    """
-
-    # Tokenize and truncate input to the model context limit.
-    inputs = summarization_tokenizer(
-        request.text,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024
-    )
-
-    # Move tensors to GPU when available.
-    if summarization_device == "cuda":
-
-        inputs = {
-            key: value.to("cuda")
-            for key, value in inputs.items()
-        }
-
-    # Disable gradient calculation for inference.
-    with torch.no_grad():
-
-        summary_ids = summarization_model.generate(
-            **inputs,
-            max_new_tokens=request.max_tokens,
-            min_new_tokens=request.min_tokens,
-            num_beams=request.num_beams,
-            do_sample=False
-        )
-
-    # Convert generated tokens back into text.
-    summary = summarization_tokenizer.decode(
-        summary_ids[0],
-        skip_special_tokens=True
-    )
-
-    return summary
-
-
-# 26. SUMMARIZATION API ENDPOINT
+# ============================================================
+# 21. SUMMARIZATION ENDPOINT
+# ============================================================
 
 @app.post(
     "/api/v1/summarize",
@@ -669,18 +541,27 @@ def run_summarization_inference(
 async def summarize_text(
     request: SummarizationRequest
 ):
-    """
-    Perform abstractive text summarization.
-    """
+
+    if hf_client is None:
+        raise ValueError(
+            "HF_TOKEN is not configured."
+        )
 
     start_time = time.perf_counter()
 
-    loop = asyncio.get_running_loop()
+    # Remote summarization is performed by Hugging Face.
+    # No summarization model is stored inside the container.
 
-    summary = await loop.run_in_executor(
-        inference_executor,
-        run_summarization_inference,
-        request
+    result = await asyncio.to_thread(
+        hf_client.summarization,
+        request.text,
+        model=SUMMARIZATION_MODEL,
+        truncation="longest_first",
+        generate_parameters={
+            "max_new_tokens": request.max_tokens,
+            "min_new_tokens": request.min_tokens,
+            "num_beams": request.num_beams
+        }
     )
 
     latency = time.perf_counter() - start_time
@@ -691,78 +572,13 @@ async def summarize_text(
     )
 
     return SummarizationResponse(
-        summary=summary
+        summary=result.generated_text
     )
 
 
-# 27. GENERATION INFERENCE FUNCTION
-
-def run_generation_inference(
-    request: GenerationRequest
-):
-    """
-    Run causal language model inference.
-    """
-
-    # Tokenize prompt and truncate to model context limit.
-    inputs = generation_tokenizer(
-        request.prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024
-    )
-
-    # Move tensors to GPU when available.
-    if generation_device == "cuda":
-
-        inputs = {
-            key: value.to("cuda")
-            for key, value in inputs.items()
-        }
-
-    # Basic generation configuration.
-    generation_kwargs = {
-        "max_new_tokens": request.max_tokens,
-        "do_sample": request.do_sample,
-        "num_beams": request.num_beams,
-        "pad_token_id": generation_tokenizer.eos_token_id
-    }
-
-    # Add sampling parameters only when sampling is enabled.
-    if request.do_sample:
-
-        if request.top_k is not None:
-
-            generation_kwargs["top_k"] = request.top_k
-
-        if request.top_p is not None:
-
-            generation_kwargs["top_p"] = request.top_p
-
-        if request.temperature is not None:
-
-            generation_kwargs["temperature"] = (
-                request.temperature
-            )
-
-    # Run model inference without gradients.
-    with torch.no_grad():
-
-        output_ids = generation_model.generate(
-            **inputs,
-            **generation_kwargs
-        )
-
-    # Decode generated tokens.
-    generated_text = generation_tokenizer.decode(
-        output_ids[0],
-        skip_special_tokens=True
-    )
-
-    return generated_text
-
-
-# 28. GENERATION API ENDPOINT
+# ============================================================
+# 22. TEXT GENERATION ENDPOINT
+# ============================================================
 
 @app.post(
     "/api/v1/generate",
@@ -771,18 +587,60 @@ def run_generation_inference(
 async def generate_text(
     request: GenerationRequest
 ):
-    """
-    Generate text using the causal language model.
-    """
+
+    if hf_client is None:
+        raise ValueError(
+            "HF_TOKEN is not configured."
+        )
 
     start_time = time.perf_counter()
 
-    loop = asyncio.get_running_loop()
+    # Basic generation configuration.
 
-    generated_text = await loop.run_in_executor(
-        inference_executor,
-        run_generation_inference,
-        request
+    generation_parameters = {
+        "max_new_tokens": request.max_tokens,
+        "do_sample": request.do_sample,
+        "return_full_text": True
+    }
+
+    # Beam search configuration.
+
+    if request.num_beams > 1:
+
+        generation_parameters["num_beams"] = (
+            request.num_beams
+        )
+
+    # Sampling parameters are only applied when sampling
+    # has explicitly been enabled.
+
+    if request.do_sample:
+
+        if request.top_k is not None:
+
+            generation_parameters["top_k"] = (
+                request.top_k
+            )
+
+        if request.top_p is not None:
+
+            generation_parameters["top_p"] = (
+                request.top_p
+            )
+
+        if request.temperature is not None:
+
+            generation_parameters["temperature"] = (
+                request.temperature
+            )
+
+    # Hugging Face text_generation returns a string by default.
+
+    generated_text = await asyncio.to_thread(
+        hf_client.text_generation,
+        request.prompt,
+        model=GENERATION_MODEL,
+        **generation_parameters
     )
 
     latency = time.perf_counter() - start_time
@@ -797,8 +655,18 @@ async def generate_text(
     )
 
 
-# 29. STARTUP MESSAGE
+# ============================================================
+# 23. STARTUP INFORMATION
+# ============================================================
 
 logger.info(
-    "Task 28 Part B API configuration complete."
+    "Task 28 Part C API configuration complete."
+)
+
+logger.info(
+    "Production configuration: Hugging Face remote inference."
+)
+
+logger.info(
+    "Render-compatible lightweight deployment enabled."
 )
