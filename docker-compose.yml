@@ -1,0 +1,38 @@
+services:
+  task28-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: task28-api
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    volumes:
+      - ./app.py:/app/app.py:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 600s
+      retries: 5
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+
+    restart: unless-stopped
