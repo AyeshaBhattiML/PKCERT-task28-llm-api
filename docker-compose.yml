@@ -5,9 +5,11 @@ services:
       dockerfile: Dockerfile
 
     container_name: task28-api
+    env_file:
+      - .env
 
     ports:
-      - "8000:8000"
+      - "8000:10000"
 
     environment:
       PYTHONUNBUFFERED: "1"
@@ -22,12 +24,12 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"
+          "import urllib.request; urllib.request.urlopen('http://localhost:10000/healthz')"
         ]
       interval: 30s
       timeout: 10s
-      start_period: 600s
-      retries: 5
+      start_period: 20s
+      retries: 3
 
     deploy:
       resources:

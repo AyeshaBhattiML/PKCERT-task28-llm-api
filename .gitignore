@@ -40,3 +40,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Benchmark outputs
+locustfile.py
+task28_*_stats.csv
+task28_*_stats_history.csv
+task28_*_failures.csv
+task28_*_exceptions.csv

@@ -66,9 +66,8 @@ logger.addHandler(handler)
 # Models remain on Hugging Face.
 # Render does NOT download or store model weights.
 
-SENTIMENT_MODEL = (
-    "distilbert-base-uncased-finetuned-sst-2-english"
-)
+
+SENTIMENT_MODEL = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
 
 SUMMARIZATION_MODEL = (
     "sshleifer/distilbart-cnn-6-6"
@@ -549,19 +548,10 @@ async def summarize_text(
 
     start_time = time.perf_counter()
 
-    # Remote summarization is performed by Hugging Face.
-    # No summarization model is stored inside the container.
-
     result = await asyncio.to_thread(
         hf_client.summarization,
         request.text,
-        model=SUMMARIZATION_MODEL,
-        truncation="longest_first",
-        generate_parameters={
-            "max_new_tokens": request.max_tokens,
-            "min_new_tokens": request.min_tokens,
-            "num_beams": request.num_beams
-        }
+        model=SUMMARIZATION_MODEL
     )
 
     latency = time.perf_counter() - start_time
@@ -574,8 +564,6 @@ async def summarize_text(
     return SummarizationResponse(
         summary=result.generated_text
     )
-
-
 # ============================================================
 # 22. TEXT GENERATION ENDPOINT
 # ============================================================

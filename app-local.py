@@ -724,47 +724,19 @@ async def sentiment_analysis(
 
 # 27. SUMMARIZATION INFERENCE
 
-def run_summarization_inference(
-    request: SummarizationRequest
-):
-
-    # Load the model only when the summarization endpoint is used.
-    load_summarization_model()
-
-    # Tokenize and truncate input to the model context limit.
-    inputs = summarization_tokenizer(
+def run_summarization_inference(request: SummarizationRequest):
+    result = hf_client.summarization(
         request.text,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024
+        model=SUMMARIZATION_MODEL
     )
 
-    # Move tensors to GPU when available.
-    if summarization_device == "cuda":
-
-        inputs = {
-            key: value.to("cuda")
-            for key, value in inputs.items()
-        }
-
-    # Disable gradient calculation during inference.
-    with torch.no_grad():
-
-        summary_ids = summarization_model.generate(
-            **inputs,
-            max_new_tokens=request.max_tokens,
-            min_new_tokens=request.min_tokens,
-            num_beams=request.num_beams,
-            do_sample=False
+    if isinstance(result, dict):
+        return result.get(
+            "summary_text",
+            result.get("summary", "")
         )
 
-    # Convert generated tokens back into text.
-    summary = summarization_tokenizer.decode(
-        summary_ids[0],
-        skip_special_tokens=True
-    )
-
-    return summary
+    return str(result)
 
 
 # 28. SUMMARIZATION ENDPOINT
@@ -801,67 +773,48 @@ async def summarize_text(
 
 # 29. GENERATION INFERENCE
 
-def run_generation_inference(
+def run_generation_inference(request: GenerationRequest):
+    result = hf_client.text_generation(
+        request.prompt,
+        model=GENERATION_MODEL,
+        max_new_tokens=request.max_tokens,
+        do_sample=request.do_sample,
+        num_beams=request.num_beams
+    )
+
+    return str(result)
+
+
+# 30. GENERATION ENDPOINT
+
+@app.post(
+    "/api/v1/generate",
+    response_model=GenerationResponse
+)
+async def generate_text(
     request: GenerationRequest
 ):
 
-    # Load the model only when the generation endpoint is used.
-    load_generation_model()
+    start_time = time.perf_counter()
 
-    # Tokenize prompt and truncate to the model context limit.
-    inputs = generation_tokenizer(
-        request.prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024
+    loop = asyncio.get_running_loop()
+
+    generated_text = await loop.run_in_executor(
+        inference_executor,
+        run_generation_inference,
+        request
     )
 
-    # Move tensors to GPU when available.
-    if generation_device == "cuda":
+    latency = time.perf_counter() - start_time
 
-        inputs = {
-            key: value.to("cuda")
-            for key, value in inputs.items()
-        }
-
-    # Basic generation configuration.
-    generation_kwargs = {
-        "max_new_tokens": request.max_tokens,
-        "do_sample": request.do_sample,
-        "num_beams": request.num_beams,
-        "pad_token_id": generation_tokenizer.eos_token_id
-    }
-
-    # Add sampling parameters only when sampling is enabled.
-    if request.do_sample:
-
-        if request.top_k is not None:
-            generation_kwargs["top_k"] = request.top_k
-
-        if request.top_p is not None:
-            generation_kwargs["top_p"] = request.top_p
-
-        if request.temperature is not None:
-            generation_kwargs["temperature"] = (
-                request.temperature
-            )
-
-    # Disable gradient calculation during inference.
-    with torch.no_grad():
-
-        output_ids = generation_model.generate(
-            **inputs,
-            **generation_kwargs
-        )
-
-    # Decode generated tokens.
-    generated_text = generation_tokenizer.decode(
-        output_ids[0],
-        skip_special_tokens=True
+    logger.info(
+        "Generation request completed: %.4f seconds",
+        latency
     )
 
-    return generated_text
-
+    return GenerationResponse(
+        generated_text=generated_text
+    )
 
 # 30. GENERATION ENDPOINT
 

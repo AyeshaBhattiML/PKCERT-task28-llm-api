@@ -1,4 +1,3 @@
-```dockerfile
 # ============================================================
 # TASK 28 - PART C
 # Lightweight Production Dockerfile
@@ -45,4 +44,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD pyth
 
 # Render-compatible startup command.
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
-```
