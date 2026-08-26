@@ -430,14 +430,3 @@ This project provided practical experience in:
 
 ---
 
-## Repository
-
-GitHub Profile:
-
-https://github.com/AyeshaBhattiML
-
-Repository:
-
-https://github.com/AyeshaBhattiML/<repository-name>
-
-> Replace `<repository-name>` with the actual name of your Task 28 GitHub repository.
